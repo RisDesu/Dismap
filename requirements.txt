@@ -1,0 +1,20 @@
+# DISMAP v0.1 - Dependencies
+# This project uses only Python standard library modules
+# No external Python packages are required
+
+# System Requirements:
+# - Python 3.5 or higher
+# - Nmap (must be installed separately)
+#   Install on Kali/Debian: sudo apt-get install nmap
+#   Install on other systems: https://nmap.org/download.html
+
+# Python Standard Library Modules Used:
+# - argparse (command-line argument parsing)
+# - subprocess (running Nmap)
+# - xml.etree.ElementTree (parsing Nmap XML output)
+# - json (exporting results)
+# - datetime (timestamp generation)
+# - pathlib (file path handling)
+# - re (regular expressions for validation)
+# - sys (system-specific parameters)
+# - typing (type hints)
