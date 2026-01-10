@@ -7,12 +7,35 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, List, Any
 import re
+import os
+import platform
+
+def setup_colors():
+    """Setup color codes with Windows compatibility."""
+    # Enable ANSI escape sequences on Windows 10+
+    if platform.system() == 'Windows':
+        try:
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            kernel32.SetConsoleMode(kernel32.GetStdHandle(-11), 7)  # Enable ANSI
+        except:
+            pass  # Fallback to no colors if fails
+    
+    # Return color codes
+    return {
+        'RED': '\033[91m',
+        'GREEN': '\033[92m',
+        'CYAN': '\033[96m',
+        'YELLOW': '\033[93m',
+        'RESET': '\033[0m'
+    }
 
 def banner():
-    RED = "\033[91m"
-    GREEN = "\033[92m"
-    CYAN = "\033[96m"
-    RESET = "\033[0m"
+    colors = setup_colors()
+    RED = colors['RED']
+    GREEN = colors['GREEN']
+    CYAN = colors['CYAN']
+    RESET = colors['RESET']
 
     print(f"""
 {CYAN}===================================================={RESET}
@@ -28,7 +51,7 @@ def banner():
 
 def validate_target(target: str) -> bool:
     """
-    Validate target input (IP address or domain name).
+    Validate target input (IP address, CIDR range, or domain name).
     
     Args:
         target: Target string to validate
@@ -39,13 +62,38 @@ def validate_target(target: str) -> bool:
     if not target or len(target) > 255:
         return False
     
-    # Basic IP validation (IPv4)
-    ip_pattern = r'^(\d{1,3}\.){3}\d{1,3}$'
-    if re.match(ip_pattern, target):
+    # CIDR range validation (IPv4)
+    cidr_pattern = r'^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$'
+    if re.match(cidr_pattern, target):
+        parts = target.split('/')
+        ip = parts[0]
+        cidr = int(parts[1])
+        if 0 <= cidr <= 32:
+            ip_parts = ip.split('.')
+            if all(0 <= int(part) <= 255 for part in ip_parts):
+                return True
+        return False
+    
+    # IPv4 validation
+    ipv4_pattern = r'^(\d{1,3}\.){3}\d{1,3}$'
+    if re.match(ipv4_pattern, target):
         parts = target.split('.')
         return all(0 <= int(part) <= 255 for part in parts)
     
-    # Basic domain validation
+    # IPv6 validation (basic)
+    ipv6_pattern = r'^([0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}$'
+    if re.match(ipv6_pattern, target.replace('::', ':')):
+        return True
+    
+    # IPv6 CIDR validation
+    ipv6_cidr_pattern = r'^([0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}/\d{1,3}$'
+    if re.match(ipv6_cidr_pattern, target.replace('::', ':')):
+        parts = target.split('/')
+        if 0 <= int(parts[1]) <= 128:
+            return True
+        return False
+    
+    # Domain validation
     domain_pattern = r'^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*$'
     if re.match(domain_pattern, target):
         return True
@@ -73,59 +121,105 @@ def check_nmap() -> bool:
     except FileNotFoundError:
         return False
     except Exception as e:
-        print(f"[!] Error checking Nmap: {e}")
+        colors = setup_colors()
+        print(f"{colors['YELLOW']}[!]{colors['RESET']} Error checking Nmap: {e}")
         return False
 
-def run_nmap_scan(target: str) -> Optional[str]:
+def run_nmap_scan(target: str, scan_type: str = "syn", version_detection: bool = True, 
+                  os_detection: bool = False, ports: Optional[str] = None, 
+                  timing: Optional[str] = None, verbose: bool = False) -> Optional[str]:
     """
     Run Nmap scan on target and return XML output.
     
     Args:
-        target: IP address or domain name to scan
+        target: IP address, CIDR range, or domain name to scan
+        scan_type: Type of scan (syn, connect, udp, etc.)
+        version_detection: Enable version detection (-sV)
+        os_detection: Enable OS detection (-O)
+        ports: Port range or specific ports (e.g., "80,443" or "1-1000")
+        timing: Timing template (T0-T5)
+        verbose: Enable verbose output
         
     Returns:
         str: XML output from Nmap, or None if scan fails
     """
-    print(f"[*] Starting Nmap scan on {target}...")
+    colors = setup_colors()
+    print(f"{colors['CYAN']}[*]{colors['RESET']} Starting Nmap scan on {target}...")
     
-    # Nmap command with XML output to stdout
-    # -sS: SYN scan (requires root, but will fallback to -sT if not root)
-    # -sV: Version detection
-    # -oX -: Output XML to stdout
-    nmap_cmd = [
-        "nmap",
-        "-sS",      # SYN scan (stealth scan)
-        "-sV",      # Version detection
-        "-oX", "-", # Output XML to stdout
-        target
-    ]
+    # Build Nmap command
+    nmap_cmd = ["nmap"]
+    
+    # Scan type
+    if scan_type == "syn":
+        nmap_cmd.append("-sS")
+    elif scan_type == "connect":
+        nmap_cmd.append("-sT")
+    elif scan_type == "udp":
+        nmap_cmd.append("-sU")
+    else:
+        nmap_cmd.append("-sS")  # Default to SYN scan
+    
+    # Version detection
+    if version_detection:
+        nmap_cmd.append("-sV")
+    
+    # OS detection (requires root)
+    if os_detection:
+        nmap_cmd.append("-O")
+    
+    # Port specification
+    if ports:
+        nmap_cmd.extend(["-p", ports])
+    
+    # Timing template
+    if timing:
+        nmap_cmd.append(f"-T{timing}")
+    
+    # Verbose mode
+    if verbose:
+        nmap_cmd.append("-v")
+    
+    # Output XML to stdout
+    nmap_cmd.extend(["-oX", "-"])
+    
+    # Add target
+    nmap_cmd.append(target)
     
     try:
         # Run Nmap and capture XML output
+        if verbose:
+            print(f"{colors['YELLOW']}[DEBUG]{colors['RESET']} Running: {' '.join(nmap_cmd)}")
+        
         result = subprocess.run(
             nmap_cmd,
             capture_output=True,
             text=True,
-            timeout=300  # 5 minute timeout
+            timeout=600  # 10 minute timeout (increased for larger scans)
         )
         
         if result.returncode == 0:
-            print("[+] Nmap scan completed successfully")
+            print(f"{colors['GREEN']}[+]{colors['RESET']} Nmap scan completed successfully")
+            if verbose and result.stderr:
+                print(f"{colors['YELLOW']}[INFO]{colors['RESET']} {result.stderr}")
             return result.stdout
         else:
-            print(f"[!] Nmap scan failed with return code: {result.returncode}")
+            print(f"{colors['RED']}[!]{colors['RESET']} Nmap scan failed with return code: {result.returncode}")
             if result.stderr:
-                print(f"[!] Error: {result.stderr}")
+                print(f"{colors['RED']}[!]{colors['RESET']} Error: {result.stderr}")
+            # Check if it's a permission issue
+            if "requires root privileges" in result.stderr or "Operation not permitted" in result.stderr:
+                print(f"{colors['YELLOW']}[!]{colors['RESET']} Note: Some scan types require root/administrator privileges.")
+                print(f"{colors['YELLOW']}[!]{colors['RESET']} Try: sudo python3 dismap.py -t {target}")
             return None
             
     except subprocess.TimeoutExpired:
-        print("[!] Nmap scan timed out (exceeded 5 minutes)")
+        print(f"{colors['RED']}[!]{colors['RESET']} Nmap scan timed out (exceeded 10 minutes)")
         return None
     except FileNotFoundError:
-        print("[!] Error: Nmap not found. Please install Nmap.")
+        print(f"{colors['RED']}[!]{colors['RESET']} Error: Nmap not found. Please install Nmap.")
         return None
     except Exception as e:
-        print(f"[!] Unexpected error during Nmap scan: {e}")
+        print(f"{colors['RED']}[!]{colors['RESET']} Unexpected error during Nmap scan: {e}")
         return None
 
 def parse_nmap_xml(xml_string: str) -> Optional[Dict[str, Any]]:
@@ -178,8 +272,8 @@ def parse_nmap_xml(xml_string: str) -> Optional[Dict[str, Any]]:
             
             # Get hostnames
             hostnames = host.find("hostnames")
+            host_data["hostnames"] = []
             if hostnames is not None:
-                host_data["hostnames"] = []
                 for hostname in hostnames.findall("hostname"):
                     host_data["hostnames"].append({
                         "name": hostname.get("name", ""),
@@ -215,20 +309,49 @@ def parse_nmap_xml(xml_string: str) -> Optional[Dict[str, Any]]:
                             "version": service_elem.get("version", ""),
                             "extrainfo": service_elem.get("extrainfo", ""),
                             "method": service_elem.get("method", ""),
-                            "conf": service_elem.get("conf", "")
+                            "conf": service_elem.get("conf", ""),
+                            "cpe": service_elem.get("cpe", "")
                         }
                     
                     host_data["ports"].append(port_data)
+            
+            # Get OS detection results
+            os_elem = host.find("os")
+            host_data["os"] = {}
+            if os_elem is not None:
+                os_matches = []
+                for osmatch in os_elem.findall("osmatch"):
+                    os_matches.append({
+                        "name": osmatch.get("name", ""),
+                        "accuracy": osmatch.get("accuracy", ""),
+                        "line": osmatch.get("line", "")
+                    })
+                host_data["os"]["matches"] = os_matches
+                
+                # Get OS classes
+                os_classes = []
+                for osclass in os_elem.findall("osclass"):
+                    os_classes.append({
+                        "type": osclass.get("type", ""),
+                        "vendor": osclass.get("vendor", ""),
+                        "osgen": osclass.get("osgen", ""),
+                        "accuracy": osclass.get("accuracy", ""),
+                        "cpe": osclass.get("cpe", "")
+                    })
+                if os_classes:
+                    host_data["os"]["classes"] = os_classes
             
             scan_data["hosts"].append(host_data)
         
         return scan_data
         
     except ET.ParseError as e:
-        print(f"[!] Error parsing XML: {e}")
+        colors = setup_colors()
+        print(f"{colors['RED']}[!]{colors['RESET']} Error parsing XML: {e}")
         return None
     except Exception as e:
-        print(f"[!] Unexpected error during XML parsing: {e}")
+        colors = setup_colors()
+        print(f"{colors['RED']}[!]{colors['RESET']} Unexpected error during XML parsing: {e}")
         return None
 
 def save_json_output(data: Dict[str, Any], target: str) -> Optional[str]:
@@ -258,67 +381,137 @@ def save_json_output(data: Dict[str, Any], target: str) -> Optional[str]:
         with open(filepath, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
         
-        print(f"[+] Results saved to: {filepath}")
+        colors = setup_colors()
+        print(f"{colors['GREEN']}[+]{colors['RESET']} Results saved to: {filepath}")
         return str(filepath)
         
     except PermissionError:
-        print(f"[!] Error: Permission denied when writing to {filepath}")
+        colors = setup_colors()
+        print(f"{colors['RED']}[!]{colors['RESET']} Error: Permission denied when writing to output directory")
         return None
     except Exception as e:
-        print(f"[!] Error saving JSON file: {e}")
+        colors = setup_colors()
+        print(f"{colors['RED']}[!]{colors['RESET']} Error saving JSON file: {e}")
         return None
 
 def main():
-    parser = argparse.ArgumentParser(description="DISMAP - Information Mapping Tool")
-    parser.add_argument("-t", "--target", required=True, help="Target IP or Domain")
+    colors = setup_colors()
+    parser = argparse.ArgumentParser(
+        description="DISMAP - Discovery Information Mapping Tool",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python3 dismap.py -t 192.168.1.1
+  python3 dismap.py -t example.com -O -v
+  python3 dismap.py -t 192.168.1.0/24 -p 80,443,8080
+  python3 dismap.py -t 192.168.1.1 --scan-type connect --timing T4
+        """
+    )
+    parser.add_argument("-t", "--target", required=True, 
+                       help="Target IP address, CIDR range (e.g., 192.168.1.0/24), or domain name")
+    parser.add_argument("-s", "--scan-type", choices=["syn", "connect", "udp"], 
+                       default="syn", help="Scan type (default: syn)")
+    parser.add_argument("-p", "--ports", 
+                       help="Port range or specific ports (e.g., '80,443' or '1-1000')")
+    parser.add_argument("-O", "--os-detection", action="store_true",
+                       help="Enable OS detection (requires root privileges)")
+    parser.add_argument("--no-version", action="store_true",
+                       help="Disable version detection (faster scan)")
+    parser.add_argument("-T", "--timing", choices=["0", "1", "2", "3", "4", "5"],
+                       help="Timing template (0=paranoid, 5=insane, default: 3)")
+    parser.add_argument("-v", "--verbose", action="store_true",
+                       help="Enable verbose output")
+    parser.add_argument("--no-banner", action="store_true",
+                       help="Hide banner")
+    
     args = parser.parse_args()
 
-    banner()
-    print(f"[+] Target: {args.target}")
+    if not args.no_banner:
+        banner()
+    
+    print(f"{colors['GREEN']}[+]{colors['RESET']} Target: {args.target}")
     
     # Validate target input
     if not validate_target(args.target):
-        print("[!] Error: Invalid target format. Please provide a valid IP address or domain name.")
+        print(f"{colors['RED']}[!]{colors['RESET']} Error: Invalid target format.")
+        print(f"{colors['RED']}[!]{colors['RESET']} Please provide a valid IP address, CIDR range, or domain name.")
         sys.exit(1)
     
     # Check if Nmap is available
     if not check_nmap():
-        print("[!] Error: Nmap is not installed or not in PATH")
-        print("[!] Please install Nmap: sudo apt-get install nmap (on Kali/Debian)")
+        print(f"{colors['RED']}[!]{colors['RESET']} Error: Nmap is not installed or not in PATH")
+        print(f"{colors['RED']}[!]{colors['RESET']} Please install Nmap:")
+        if platform.system() == "Windows":
+            print(f"{colors['YELLOW']}    Download from: https://nmap.org/download.html{colors['RESET']}")
+        else:
+            print(f"{colors['YELLOW']}    sudo apt-get install nmap (on Kali/Debian/Ubuntu){colors['RESET']}")
         sys.exit(1)
     
     # Run Nmap scan
-    xml_output = run_nmap_scan(args.target)
+    xml_output = run_nmap_scan(
+        target=args.target,
+        scan_type=args.scan_type,
+        version_detection=not args.no_version,
+        os_detection=args.os_detection,
+        ports=args.ports,
+        timing=args.timing,
+        verbose=args.verbose
+    )
     
     if not xml_output:
-        print("[!] Failed to retrieve scan data")
+        print(f"{colors['RED']}[!]{colors['RESET']} Failed to retrieve scan data")
         sys.exit(1)
     
-    # Parse XML output (Phase 2)
-    print("[*] Parsing scan results...")
+    # Parse XML output
+    print(f"{colors['CYAN']}[*]{colors['RESET']} Parsing scan results...")
     scan_data = parse_nmap_xml(xml_output)
     
     if not scan_data:
-        print("[!] Failed to parse scan data")
+        print(f"{colors['RED']}[!]{colors['RESET']} Failed to parse scan data")
         sys.exit(1)
     
     # Display summary
-    print(f"[+] Found {len(scan_data['hosts'])} host(s)")
+    print(f"\n{colors['GREEN']}[+]{colors['RESET']} Found {len(scan_data['hosts'])} host(s)")
     for host in scan_data['hosts']:
         if host.get('addresses'):
             ip = host['addresses'][0].get('addr', 'unknown')
             status = host.get('status', {}).get('state', 'unknown')
             port_count = len(host.get('ports', []))
-            print(f"    - {ip}: {status} ({port_count} port(s) found)")
+            
+            # Count open ports
+            open_ports = sum(1 for p in host.get('ports', []) 
+                           if p.get('state', {}).get('state') == 'open')
+            
+            # Get OS info if available
+            os_info = ""
+            if host.get('os', {}).get('matches'):
+                os_info = f" | OS: {host['os']['matches'][0].get('name', 'unknown')}"
+            
+            print(f"    {colors['CYAN']}-{colors['RESET']} {ip}: {status} | {open_ports}/{port_count} open port(s){os_info}")
+            
+            # Show open ports summary
+            if args.verbose and host.get('ports'):
+                for port in host['ports']:
+                    if port.get('state', {}).get('state') == 'open':
+                        port_num = port.get('port', '')
+                        service = port.get('service', {})
+                        service_name = service.get('name', 'unknown')
+                        product = service.get('product', '')
+                        version = service.get('version', '')
+                        if product or version:
+                            print(f"        {colors['GREEN']}└─{colors['RESET']} Port {port_num}/{port.get('protocol', 'tcp')}: {service_name} {product} {version}".strip())
+                        else:
+                            print(f"        {colors['GREEN']}└─{colors['RESET']} Port {port_num}/{port.get('protocol', 'tcp')}: {service_name}")
     
-    # Save to JSON (Phase 3)
-    print("[*] Exporting results to JSON...")
+    # Save to JSON
+    print(f"\n{colors['CYAN']}[*]{colors['RESET']} Exporting results to JSON...")
     output_file = save_json_output(scan_data, args.target)
     
     if output_file:
-        print("[+] DISMAP scan completed successfully!")
+        print(f"{colors['GREEN']}[+]{colors['RESET']} DISMAP scan completed successfully!")
+        print(f"{colors['GREEN']}[+]{colors['RESET']} Results saved to: {output_file}")
     else:
-        print("[!] Warning: Scan completed but failed to save results")
+        print(f"{colors['RED']}[!]{colors['RESET']} Warning: Scan completed but failed to save results")
         sys.exit(1)
 
 if __name__ == "__main__":
